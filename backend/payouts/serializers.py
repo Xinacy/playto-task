@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from .models import Merchant, Credit, Payout, IdempotencyKey
+from .models import Credit, IdempotencyKey, Merchant, Payout
 
 
 class MerchantSerializer(serializers.ModelSerializer):
@@ -21,7 +21,7 @@ class MerchantSerializer(serializers.ModelSerializer):
 class CreditSerializer(serializers.ModelSerializer):
     class Meta:
         model = Credit
-        fields = ["id", "merchant", "amount_paise", "description", "created_at"]
+        fields = ["id", "amount_paise", "description", "created_at"]
 
 
 class PayoutSerializer(serializers.ModelSerializer):
@@ -29,11 +29,9 @@ class PayoutSerializer(serializers.ModelSerializer):
         model = Payout
         fields = [
             "id",
-            "merchant",
             "amount_paise",
             "bank_account_id",
             "status",
-            "idempotency_key",
             "created_at",
             "updated_at",
             "processing_started_at",

@@ -1,7 +1,8 @@
 from django.core.management.base import BaseCommand
 from django.contrib.auth.models import User
+from django.db.models import Sum
+from django.db.models.functions import Coalesce
 from payouts.models import Merchant, Credit
-import random
 
 
 class Command(BaseCommand):
@@ -13,18 +14,18 @@ class Command(BaseCommand):
             {
                 "username": "merchant1",
                 "email": "merchant1@example.com",
-                "balance": 1000000,
-            },  # 10,000 INR
+                "credits": [250000, 175000, 85000],
+            },
             {
                 "username": "merchant2",
                 "email": "merchant2@example.com",
-                "balance": 500000,
-            },  # 5,000 INR
+                "credits": [125000, 90000, 60000],
+            },
             {
                 "username": "merchant3",
                 "email": "merchant3@example.com",
-                "balance": 200000,
-            },  # 2,000 INR
+                "credits": [50000, 45000, 30000],
+            },
         ]
 
         for data in merchants_data:
@@ -39,27 +40,30 @@ class Command(BaseCommand):
                 self.stdout.write(f"User already exists: {user.username}")
 
             merchant, created = Merchant.objects.get_or_create(
-                user=user, defaults={"balance_paise": data["balance"]}
+                user=user, defaults={"balance_paise": 0, "held_balance_paise": 0}
             )
             if created:
                 self.stdout.write(
-                    f"Created merchant: {merchant.user.username} with balance {data['balance']} paise"
+                    f"Created merchant: {merchant.user.username}"
                 )
             else:
                 self.stdout.write(f"Merchant already exists: {merchant.user.username}")
 
-            # Add some credits
-            for i in range(5):
-                amount = random.randint(10000, 100000)  # 100 to 1000 INR
-                Credit.objects.create(
-                    merchant=merchant,
-                    amount_paise=amount,
-                    description=f"Customer payment #{i+1}",
-                )
-                merchant.balance_paise += amount
-                merchant.save()
+            if not merchant.credits.exists():
+                for index, amount in enumerate(data["credits"], start=1):
+                    Credit.objects.create(
+                        merchant=merchant,
+                        amount_paise=amount,
+                        description=f"Seed customer payment #{index}",
+                    )
+                self.stdout.write(f"Added credits to {merchant.user.username}")
 
-            self.stdout.write(f"Added 5 credits to {merchant.user.username}")
+            credit_total = merchant.credits.aggregate(
+                total=Coalesce(Sum("amount_paise"), 0)
+            )["total"]
+            merchant.balance_paise = credit_total
+            merchant.held_balance_paise = 0
+            merchant.save(update_fields=["balance_paise", "held_balance_paise", "updated_at"])
 
         self.stdout.write(
             self.style.SUCCESS("Successfully seeded database with test data")

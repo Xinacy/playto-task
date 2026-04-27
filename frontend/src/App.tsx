@@ -1,14 +1,37 @@
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
+import {
+  AlertCircle,
+  ArrowDownToLine,
+  BanknoteArrowDown,
+  CheckCircle,
+  CircleDollarSign,
+  Clock3,
+  Landmark,
+  Loader2,
+  RefreshCw,
+  ShieldCheck,
+  WalletCards,
+} from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
   Card,
+  CardAction,
   CardContent,
   CardDescription,
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Table,
   TableBody,
@@ -17,11 +40,11 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { Badge } from "@/components/ui/badge";
-import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Loader2, AlertCircle, CheckCircle, RefreshCw } from "lucide-react";
 
 interface Merchant {
+  id?: number;
+  username?: string;
+  email?: string;
   available_balance_paise: number;
   held_balance_paise: number;
   total_balance_paise: number;
@@ -44,25 +67,43 @@ interface PayoutResponse {
   created_at: string;
 }
 
-function formatPaise(paise: number): string {
-  const rupees = paise / 100;
-  return `₹${rupees.toFixed(2)}`;
+function formatPaise(paise = 0): string {
+  return `₹${(paise / 100).toLocaleString("en-IN", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
+function formatDate(value: string): string {
+  return new Date(value).toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 }
 
 function formatStatus(status: string): React.ReactNode {
   const variants: Record<
     string,
-    "default" | "secondary" | "destructive" | "outline" | "ghost" | "link"
+    "default" | "secondary" | "destructive" | "outline"
   > = {
     pending: "secondary",
     processing: "outline",
     completed: "default",
     failed: "destructive",
   };
-  return <Badge variant={variants[status] || "default"}>{status}</Badge>;
+
+  return (
+    <Badge className="capitalize" variant={variants[status] || "default"}>
+      {status}
+    </Badge>
+  );
 }
 
 export default function App() {
+  const [merchants, setMerchants] = useState<Merchant[]>([]);
+  const [selectedMerchant, setSelectedMerchant] = useState("");
   const [merchant, setMerchant] = useState<Merchant | null>(null);
   const [recentCredits, setRecentCredits] = useState<Transaction[]>([]);
   const [recentDebits, setRecentDebits] = useState<Transaction[]>([]);
@@ -70,91 +111,107 @@ export default function App() {
   const [amount, setAmount] = useState("");
   const [bankAccountId, setBankAccountId] = useState("");
   const [loading, setLoading] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
 
-  const fetchDashboard = async () => {
-    try {
-      const response = await fetch("http://localhost:8000/api/v1/dashboard", {
-        headers: {
-          Authorization: "Bearer demo-token", // In real app, use actual auth
-        },
-      });
-      if (!response.ok) throw new Error("Failed to fetch dashboard");
-      const data = await response.json();
-      setMerchant(data);
-      setRecentCredits(data.recent_credits || []);
-      setRecentDebits(data.recent_debits || []);
-    } catch (err) {
-      console.error("Failed to fetch dashboard:", err);
-    }
+  const activeMerchant = useMemo(
+    () => merchants.find((item) => item.username === selectedMerchant),
+    [merchants, selectedMerchant],
+  );
+
+  const merchantHeaders = selectedMerchant
+    ? { "X-Merchant-Username": selectedMerchant }
+    : undefined;
+
+  const fetchMerchants = async () => {
+    const response = await fetch("/api/v1/merchants");
+    if (!response.ok) throw new Error("Failed to fetch merchants");
+    const data: Merchant[] = await response.json();
+    setMerchants(data);
+    setSelectedMerchant((current) => current || data[0]?.username || "");
   };
 
-  // Fetch payout history
+  const fetchDashboard = async () => {
+    if (!selectedMerchant) return;
+    const response = await fetch("/api/v1/dashboard", {
+      headers: merchantHeaders,
+    });
+    if (!response.ok) throw new Error("Failed to fetch dashboard");
+    const data = await response.json();
+    setMerchant(data);
+    setRecentCredits(data.recent_credits || []);
+    setRecentDebits(data.recent_debits || []);
+  };
+
   const fetchPayoutHistory = async () => {
+    if (!selectedMerchant) return;
+    const response = await fetch("/api/v1/payouts/history", {
+      headers: merchantHeaders,
+    });
+    if (!response.ok) throw new Error("Failed to fetch payout history");
+    setPayoutHistory(await response.json());
+  };
+
+  const refreshAll = async () => {
+    setRefreshing(true);
     try {
-      const response = await fetch("/api/v1/payouts/history", {
-        headers: {
-          Authorization: "Bearer demo-token",
-        },
-      });
-      if (!response.ok) throw new Error("Failed to fetch payout history");
-      const data = await response.json();
-      setPayoutHistory(data);
+      await fetchMerchants();
+      await Promise.all([fetchDashboard(), fetchPayoutHistory()]);
     } catch (err) {
-      console.error("Failed to fetch payout history:", err);
+      console.error("Failed to refresh dashboard:", err);
+    } finally {
+      setRefreshing(false);
     }
   };
 
   useEffect(() => {
-    fetchDashboard();
-    fetchPayoutHistory();
-
-    // Poll for updates every 5 seconds
-    const interval = setInterval(() => {
-      fetchDashboard();
-      fetchPayoutHistory();
-    }, 5000);
-
-    return () => clearInterval(interval);
+    fetchMerchants().catch((err) =>
+      console.error("Failed to fetch merchants:", err),
+    );
   }, []);
 
-  const handlePayoutRequest = async (e: React.FormEvent) => {
-    e.preventDefault();
+  useEffect(() => {
+    setMerchant(null);
+    setRecentCredits([]);
+    setRecentDebits([]);
+    setPayoutHistory([]);
+    setError("");
+    setSuccess("");
+
+    refreshAll();
+    const interval = setInterval(refreshAll, 5000);
+    return () => clearInterval(interval);
+  }, [selectedMerchant]);
+
+  const handlePayoutRequest = async (event: React.FormEvent) => {
+    event.preventDefault();
     setLoading(true);
     setError("");
     setSuccess("");
 
     try {
-      const amountPaise = Math.round(parseFloat(amount) * 100);
-      const idempotencyKey = crypto.randomUUID();
-
+      const amountPaise = Math.round(Number.parseFloat(amount) * 100);
       const response = await fetch("/api/v1/payouts", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Idempotency-Key": idempotencyKey,
-          Authorization: "Bearer demo-token",
+          "Idempotency-Key": crypto.randomUUID(),
+          ...merchantHeaders,
         },
         body: JSON.stringify({
           amount_paise: amountPaise,
           bank_account_id: bankAccountId,
         }),
       });
-
       const data = await response.json();
-
-      if (!response.ok) {
+      if (!response.ok)
         throw new Error(data.error || "Failed to create payout");
-      }
 
-      setSuccess(`Payout created successfully! ID: ${data.id}`);
+      setSuccess(`Payout ${data.id.slice(0, 8)} created and funds are held.`);
       setAmount("");
       setBankAccountId("");
-
-      // Refresh data
-      fetchDashboard();
-      fetchPayoutHistory();
+      await refreshAll();
     } catch (err) {
       setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
@@ -162,262 +219,346 @@ export default function App() {
     }
   };
 
+  const balanceCards = [
+    {
+      title: "Available",
+      value: formatPaise(merchant?.available_balance_paise),
+      detail: "Ready for payout",
+      icon: WalletCards,
+      tone: "text-emerald-300",
+    },
+    {
+      title: "Held",
+      value: formatPaise(merchant?.held_balance_paise),
+      detail: "Pending bank settlement",
+      icon: Clock3,
+      tone: "text-amber-300",
+    },
+    {
+      title: "Total",
+      value: formatPaise(merchant?.total_balance_paise),
+      detail: "Available plus held",
+      icon: CircleDollarSign,
+      tone: "text-sky-300",
+    },
+  ];
+
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      <div className="max-w-6xl mx-auto">
-        <header className="mb-8">
-          <h1 className="text-3xl font-bold text-gray-900">
-            Playto Payout Dashboard
-          </h1>
-          <p className="text-gray-600 mt-2">
-            Manage your balance and request payouts
-          </p>
+    <div className="min-h-screen bg-background text-foreground">
+      <main className="mx-auto flex max-w-7xl flex-col gap-6 px-4 py-6 sm:px-6 lg:px-8">
+        <header className="rounded-[2rem] border border-border/70 bg-card/70 p-5 shadow-2xl shadow-black/20 backdrop-blur md:p-6">
+          <div className="flex flex-col gap-5 lg:flex-row lg:items-end lg:justify-between">
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <div className="flex size-9 items-center justify-center rounded-2xl bg-primary/15 text-primary">
+                  <ShieldCheck className="size-5" />
+                </div>
+                <Badge
+                  variant="outline"
+                  className="border-primary/30 text-primary"
+                >
+                  Live ledger
+                </Badge>
+              </div>
+              <div>
+                <h1 className="text-3xl font-semibold tracking-normal text-foreground md:text-4xl">
+                  Playto Payouts
+                </h1>
+                <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
+                  Monitor merchant balances, holds, payout attempts, and bank
+                  settlement state from one synced console.
+                </p>
+              </div>
+            </div>
+
+            <div className="grid gap-2 sm:min-w-80">
+              <Label
+                htmlFor="merchantAccount"
+                className="text-muted-foreground"
+              >
+                Merchant account
+              </Label>
+              <Select
+                value={selectedMerchant}
+                onValueChange={setSelectedMerchant}
+                disabled={merchants.length === 0}
+              >
+                <SelectTrigger
+                  id="merchantAccount"
+                  className="h-12 w-full rounded-2xl border-border/80 bg-background/80 px-4"
+                >
+                  <SelectValue placeholder="Select merchant" />
+                </SelectTrigger>
+                <SelectContent align="end" className="rounded-2xl">
+                  {merchants.map((item) => (
+                    <SelectItem key={item.username} value={item.username!}>
+                      <span className="font-medium">{item.username}</span>
+                      <span className="text-muted-foreground">
+                        {formatPaise(item.available_balance_paise)}
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              {activeMerchant?.email && (
+                <p className="text-xs text-muted-foreground">
+                  {activeMerchant.email}
+                </p>
+              )}
+            </div>
+          </div>
         </header>
 
-        {/* Balance Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-sm font-medium text-gray-600">
-                Available Balance
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-2xl font-bold">
-                {merchant
-                  ? formatPaise(merchant.available_balance_paise)
-                  : "₹0.00"}
-              </p>
-            </CardContent>
-          </Card>
+        <section className="grid grid-cols-1 gap-4 md:grid-cols-3">
+          {balanceCards.map((item) => {
+            const Icon = item.icon;
+            return (
+              <Card
+                key={item.title}
+                className="rounded-2xl border border-border/70 bg-card/80 shadow-xl shadow-black/10"
+              >
+                <CardHeader className="pb-0">
+                  <CardTitle className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <Icon className={`size-4 ${item.tone}`} />
+                    {item.title} balance
+                  </CardTitle>
+                </CardHeader>
+                <CardContent>
+                  <p className="text-3xl font-semibold tracking-normal">
+                    {item.value}
+                  </p>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    {item.detail}
+                  </p>
+                </CardContent>
+              </Card>
+            );
+          })}
+        </section>
 
-          <Card>
+        <section className="grid grid-cols-1 gap-6 xl:grid-cols-[0.85fr_1.15fr]">
+          <Card className="rounded-2xl border border-border/70 bg-card/80 shadow-xl shadow-black/10">
             <CardHeader>
-              <CardTitle className="text-sm font-medium text-gray-600">
-                Held Balance
+              <CardTitle className="flex items-center gap-2">
+                <BanknoteArrowDown className="size-5 text-primary" />
+                Request payout
               </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-2xl font-bold text-orange-600">
-                {merchant ? formatPaise(merchant.held_balance_paise) : "₹0.00"}
-              </p>
-            </CardContent>
-          </Card>
-
-          <Card>
-            <CardHeader>
-              <CardTitle className="text-sm font-medium text-gray-600">
-                Total Balance
-              </CardTitle>
-            </CardHeader>
-            <CardContent>
-              <p className="text-2xl font-bold text-green-600">
-                {merchant ? formatPaise(merchant.total_balance_paise) : "₹0.00"}
-              </p>
-            </CardContent>
-          </Card>
-        </div>
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-          {/* Payout Request Form */}
-          <Card>
-            <CardHeader>
-              <CardTitle>Request Payout</CardTitle>
               <CardDescription>
-                Enter amount and bank account details
+                Funds are held immediately and settled by the worker.
               </CardDescription>
             </CardHeader>
             <CardContent>
               <form onSubmit={handlePayoutRequest} className="space-y-4">
                 <div className="space-y-2">
-                  <Label htmlFor="amount">Amount (₹)</Label>
+                  <Label htmlFor="amount">Amount</Label>
                   <Input
                     id="amount"
                     type="number"
                     step="0.01"
                     min="0.01"
-                    placeholder="Enter amount in rupees"
+                    placeholder="0.00"
                     value={amount}
-                    onChange={(e) => setAmount(e.target.value)}
+                    onChange={(event) => setAmount(event.target.value)}
                     required
+                    className="h-11 rounded-2xl bg-background/80 text-lg"
                   />
                 </div>
 
                 <div className="space-y-2">
-                  <Label htmlFor="bankAccount">Bank Account ID</Label>
+                  <Label htmlFor="bankAccount">Bank account ID</Label>
                   <Input
                     id="bankAccount"
                     type="text"
-                    placeholder="Enter bank account ID"
+                    placeholder="bank_acc_..."
                     value={bankAccountId}
-                    onChange={(e) => setBankAccountId(e.target.value)}
+                    onChange={(event) => setBankAccountId(event.target.value)}
                     required
+                    className="h-11 rounded-2xl bg-background/80"
                   />
                 </div>
 
                 {error && (
                   <Alert variant="destructive">
-                    <AlertCircle className="h-4 w-4" />
+                    <AlertCircle className="size-4" />
                     <AlertDescription>{error}</AlertDescription>
                   </Alert>
                 )}
 
                 {success && (
-                  <Alert
-                    variant="default"
-                    className="bg-green-50 border-green-200"
-                  >
-                    <CheckCircle className="h-4 w-4 text-green-600" />
-                    <AlertDescription className="text-green-800">
-                      {success}
-                    </AlertDescription>
+                  <Alert className="border-emerald-500/30 bg-emerald-500/10 text-emerald-100">
+                    <CheckCircle className="size-4 text-emerald-300" />
+                    <AlertDescription>{success}</AlertDescription>
                   </Alert>
                 )}
 
-                <Button type="submit" disabled={loading} className="w-full">
-                  {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                  {loading ? "Processing..." : "Request Payout"}
+                <Button
+                  type="submit"
+                  disabled={loading || !selectedMerchant}
+                  className="h-11 w-full rounded-2xl"
+                >
+                  {loading ? (
+                    <Loader2 className="mr-2 size-4 animate-spin" />
+                  ) : (
+                    <ArrowDownToLine className="mr-2 size-4" />
+                  )}
+                  {loading ? "Creating hold..." : "Request payout"}
                 </Button>
               </form>
             </CardContent>
           </Card>
 
-          {/* Recent Transactions */}
-          <Card>
+          <Card className="rounded-2xl border border-border/70 bg-card/80 shadow-xl shadow-black/10">
             <CardHeader>
-              <CardTitle>Recent Transactions</CardTitle>
+              <CardTitle>Recent ledger activity</CardTitle>
               <CardDescription>
-                Credits and debits from the last 24 hours
+                Latest credits and payout debits for the selected merchant.
               </CardDescription>
             </CardHeader>
-            <CardContent>
-              <div className="space-y-4">
-                <div>
-                  <h4 className="text-sm font-medium text-gray-600 mb-2">
-                    Recent Credits
-                  </h4>
-                  {recentCredits.length === 0 ? (
-                    <p className="text-gray-400 text-sm">No recent credits</p>
-                  ) : (
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>Amount</TableHead>
-                          <TableHead>Description</TableHead>
-                          <TableHead>Date</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {recentCredits.map((credit) => (
-                          <TableRow key={credit.id}>
-                            <TableCell className="text-green-600 font-medium">
-                              +{formatPaise(credit.amount_paise)}
-                            </TableCell>
-                            <TableCell>
-                              {credit.description || "Credit"}
-                            </TableCell>
-                            <TableCell className="text-gray-500">
-                              {new Date(credit.created_at).toLocaleDateString()}
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  )}
-                </div>
-
-                <div>
-                  <h4 className="text-sm font-medium text-gray-600 mb-2">
-                    Recent Debits
-                  </h4>
-                  {recentDebits.length === 0 ? (
-                    <p className="text-gray-400 text-sm">No recent debits</p>
-                  ) : (
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead>Amount</TableHead>
-                          <TableHead>Status</TableHead>
-                          <TableHead>Date</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {recentDebits.map((debit) => (
-                          <TableRow key={debit.id}>
-                            <TableCell className="text-red-600 font-medium">
-                              -{formatPaise(debit.amount_paise)}
-                            </TableCell>
-                            <TableCell>
-                              {formatStatus(debit.status || "pending")}
-                            </TableCell>
-                            <TableCell className="text-gray-500">
-                              {new Date(debit.created_at).toLocaleDateString()}
-                            </TableCell>
-                          </TableRow>
-                        ))}
-                      </TableBody>
-                    </Table>
-                  )}
-                </div>
-              </div>
+            <CardContent className="grid gap-5 lg:grid-cols-2">
+              <ActivityTable
+                emptyText="No credits yet"
+                rows={recentCredits}
+                title="Credits"
+                positive
+              />
+              <ActivityTable
+                emptyText="No payout debits yet"
+                rows={recentDebits}
+                title="Debits"
+              />
             </CardContent>
           </Card>
-        </div>
+        </section>
 
-        {/* Payout History */}
-        <Card className="mt-8">
+        <Card className="rounded-2xl border border-border/70 bg-card/80 shadow-xl shadow-black/10">
           <CardHeader>
-            <div className="flex items-center justify-between">
-              <div>
-                <CardTitle>Payout History</CardTitle>
-                <CardDescription>
-                  All payout requests and their status
-                </CardDescription>
-              </div>
-              <Button variant="outline" size="sm" onClick={fetchPayoutHistory}>
-                <RefreshCw className="h-4 w-4 mr-2" />
+            <div>
+              <CardTitle>Payout history</CardTitle>
+              <CardDescription>
+                Live status updates refresh every five seconds.
+              </CardDescription>
+            </div>
+            <CardAction>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={refreshAll}
+                disabled={refreshing}
+                className="rounded-2xl"
+              >
+                <RefreshCw
+                  className={`mr-2 size-4 ${refreshing ? "animate-spin" : ""}`}
+                />
                 Refresh
               </Button>
-            </div>
+            </CardAction>
           </CardHeader>
           <CardContent>
             {payoutHistory.length === 0 ? (
-              <p className="text-gray-400 text-center py-8">
-                No payout history yet
-              </p>
+              <EmptyState text="No payout history yet" />
             ) : (
-              <Table>
-                <TableHeader>
-                  <TableRow>
-                    <TableHead>ID</TableHead>
-                    <TableHead>Amount</TableHead>
-                    <TableHead>Bank Account</TableHead>
-                    <TableHead>Status</TableHead>
-                    <TableHead>Created</TableHead>
-                  </TableRow>
-                </TableHeader>
-                <TableBody>
-                  {payoutHistory.map((payout) => (
-                    <TableRow key={payout.id}>
-                      <TableCell className="font-mono text-sm">
-                        {payout.id.slice(0, 8)}...
-                      </TableCell>
-                      <TableCell className="text-red-600 font-medium">
-                        -{formatPaise(payout.amount_paise)}
-                      </TableCell>
-                      <TableCell>{payout.bank_account_id}</TableCell>
-                      <TableCell>{formatStatus(payout.status)}</TableCell>
-                      <TableCell className="text-gray-500">
-                        {new Date(payout.created_at).toLocaleString()}
-                      </TableCell>
+              <div className="overflow-hidden rounded-2xl border border-border/70 bg-background/45">
+                <Table>
+                  <TableHeader>
+                    <TableRow className="hover:bg-transparent">
+                      <TableHead>ID</TableHead>
+                      <TableHead>Amount</TableHead>
+                      <TableHead>Bank account</TableHead>
+                      <TableHead>Status</TableHead>
+                      <TableHead>Created</TableHead>
                     </TableRow>
-                  ))}
-                </TableBody>
-              </Table>
+                  </TableHeader>
+                  <TableBody>
+                    {payoutHistory.map((payout) => (
+                      <TableRow key={payout.id}>
+                        <TableCell className="font-mono text-xs text-muted-foreground">
+                          {payout.id.slice(0, 8)}
+                        </TableCell>
+                        <TableCell className="font-medium text-rose-300">
+                          -{formatPaise(payout.amount_paise)}
+                        </TableCell>
+                        <TableCell>{payout.bank_account_id}</TableCell>
+                        <TableCell>{formatStatus(payout.status)}</TableCell>
+                        <TableCell className="text-muted-foreground">
+                          {formatDate(payout.created_at)}
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
             )}
           </CardContent>
         </Card>
+      </main>
+    </div>
+  );
+}
+
+function ActivityTable({
+  emptyText,
+  positive = false,
+  rows,
+  title,
+}: {
+  emptyText: string;
+  positive?: boolean;
+  rows: Transaction[];
+  title: string;
+}) {
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-medium text-muted-foreground">{title}</h3>
+        <Badge variant="outline">{rows.length}</Badge>
       </div>
+      {rows.length === 0 ? (
+        <EmptyState text={emptyText} compact />
+      ) : (
+        <div className="overflow-hidden rounded-2xl border border-border/70 bg-background/45">
+          <Table>
+            <TableBody>
+              {rows.slice(0, 5).map((row) => (
+                <TableRow key={row.id}>
+                  <TableCell
+                    className={`font-medium ${
+                      positive ? "text-emerald-300" : "text-rose-300"
+                    }`}
+                  >
+                    {positive ? "+" : "-"}
+                    {formatPaise(row.amount_paise)}
+                  </TableCell>
+                  <TableCell className="max-w-40 truncate text-muted-foreground">
+                    {row.description || row.bank_account_id || "Payout"}
+                  </TableCell>
+                  <TableCell className="text-right text-muted-foreground">
+                    {formatDate(row.created_at)}
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EmptyState({
+  compact = false,
+  text,
+}: {
+  compact?: boolean;
+  text: string;
+}) {
+  return (
+    <div
+      className={`flex items-center justify-center rounded-2xl border border-dashed border-border/80 bg-background/35 text-sm text-muted-foreground ${
+        compact ? "h-28" : "h-40"
+      }`}
+    >
+      <Landmark className="mr-2 size-4" />
+      {text}
     </div>
   );
 }

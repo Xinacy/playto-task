@@ -1,75 +1,77 @@
 import random
-import time
 from celery import shared_task
 from django.utils import timezone
 from django.db import transaction
+from django.db.models import F
 from datetime import timedelta
-from .models import Payout, Merchant
+from .models import Merchant, Payout
 
 
 @shared_task
 def process_pending_payouts():
     """Process pending payouts that are ready for processing."""
-    now = timezone.now()
+    with transaction.atomic():
+        pending_ids = list(
+            Payout.objects.select_for_update(skip_locked=True)
+            .filter(status="pending")
+            .order_by("created_at")
+            .values_list("id", flat=True)[:10]
+        )
 
-    # Find pending payouts that haven't been processed yet
-    pending_payouts = Payout.objects.filter(status="pending").select_for_update(
-        skip_locked=True
-    )[:10]
-
-    for payout in pending_payouts:
-        process_payout.delay(payout.id)
+    for payout_id in pending_ids:
+        process_payout.delay(str(payout_id))
 
 
 @shared_task
 def process_payout(payout_id):
     """Process a single payout with simulation of bank settlement."""
-    try:
-        payout = Payout.objects.select_for_update().get(id=payout_id)
-    except Payout.DoesNotExist:
-        return
+    with transaction.atomic():
+        try:
+            payout = Payout.objects.select_for_update().get(id=payout_id)
+        except Payout.DoesNotExist:
+            return
 
-    # Only process if still pending
-    if payout.status != "pending":
-        return
+        if payout.status not in {"pending", "processing"}:
+            return
 
-    # Move to processing state
-    payout.status = "processing"
-    payout.processing_started_at = timezone.now()
-    payout.attempts += 1
-    payout.save()
+        if payout.status == "pending":
+            payout.status = "processing"
+        payout.processing_started_at = timezone.now()
+        payout.attempts += 1
+        payout.save(
+            update_fields=["status", "processing_started_at", "attempts", "updated_at"]
+        )
 
-    # Simulate bank settlement with random outcome
     random_outcome = random.random()
 
     if random_outcome < 0.7:  # 70% success
-        # Success - mark as completed
-        payout.status = "completed"
-        payout.save()
-
-        # Release held funds (they stay with merchant since payout succeeded)
         with transaction.atomic():
+            payout = Payout.objects.select_for_update().get(id=payout_id)
+            if payout.status != "processing":
+                return
+            payout.status = "completed"
+            payout.error_message = ""
+            payout.save(update_fields=["status", "error_message", "updated_at"])
             merchant = Merchant.objects.select_for_update().get(id=payout.merchant_id)
-            merchant.held_balance_paise -= payout.amount_paise
-            merchant.save()
+            Merchant.objects.filter(id=merchant.id).update(
+                balance_paise=F("balance_paise") - payout.amount_paise,
+                held_balance_paise=F("held_balance_paise") - payout.amount_paise,
+            )
 
     elif random_outcome < 0.9:  # 20% failure
-        # Failure - mark as failed and return funds
-        payout.status = "failed"
-        payout.error_message = "Bank settlement failed"
-        payout.save()
-
-        # Return held funds to merchant balance
         with transaction.atomic():
+            payout = Payout.objects.select_for_update().get(id=payout_id)
+            if payout.status != "processing":
+                return
+            payout.status = "failed"
+            payout.error_message = "Bank settlement failed"
+            payout.save(update_fields=["status", "error_message", "updated_at"])
             merchant = Merchant.objects.select_for_update().get(id=payout.merchant_id)
-            merchant.held_balance_paise -= payout.amount_paise
-            merchant.balance_paise -= (
-                payout.amount_paise
-            )  # Remove from balance since payout failed
-            merchant.save()
+            Merchant.objects.filter(id=merchant.id).update(
+                held_balance_paise=F("held_balance_paise") - payout.amount_paise,
+            )
 
     else:  # 10% hang in processing
-        # Leave in processing state - will be retried by retry processor
         pass
 
 
@@ -77,32 +79,35 @@ def process_payout(payout_id):
 def retry_processing_payouts():
     """Retry payouts stuck in processing for more than 30 seconds."""
     now = timezone.now()
-    cutoff_time = now - timedelta(seconds=30)
 
-    # Find payouts stuck in processing for too long
-    stuck_payouts = Payout.objects.filter(
-        status="processing",
-        processing_started_at__lt=cutoff_time,
-        attempts__lt=3,  # Max 3 attempts
-    ).select_for_update(skip_locked=True)
+    with transaction.atomic():
+        stuck_payouts = list(
+            Payout.objects.select_for_update(skip_locked=True)
+            .filter(
+                status="processing",
+                processing_started_at__lt=now - timedelta(seconds=30),
+            )
+            .order_by("processing_started_at")[:25]
+        )
 
     for payout in stuck_payouts:
-        # Reset to pending to be retried
-        payout.status = "pending"
-        payout.processing_started_at = None
-        payout.save()
+        backoff_seconds = 30 * (2 ** max(payout.attempts - 1, 0))
+        if payout.processing_started_at > now - timedelta(seconds=backoff_seconds):
+            continue
 
-        # If max attempts reached, mark as failed
         if payout.attempts >= 3:
-            payout.status = "failed"
-            payout.error_message = "Max retry attempts reached"
-            payout.save()
-
-            # Return held funds
             with transaction.atomic():
+                payout = Payout.objects.select_for_update().get(id=payout.id)
+                if payout.status != "processing":
+                    continue
+                payout.status = "failed"
+                payout.error_message = "Max retry attempts reached"
+                payout.save(update_fields=["status", "error_message", "updated_at"])
                 merchant = Merchant.objects.select_for_update().get(
                     id=payout.merchant_id
                 )
-                merchant.held_balance_paise -= payout.amount_paise
-                merchant.balance_paise -= payout.amount_paise
-                merchant.save()
+                Merchant.objects.filter(id=merchant.id).update(
+                    held_balance_paise=F("held_balance_paise") - payout.amount_paise,
+                )
+        else:
+            process_payout.delay(str(payout.id))
